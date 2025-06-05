@@ -1,2 +1,6 @@
-p, admin, /dashboard, read
+p, admin, /private, read
+p, admin, /admin, write
+p, user, /public, read
+
 g, yanuar, admin
+g, bob, user

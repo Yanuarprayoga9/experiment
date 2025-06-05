@@ -1,0 +1,9 @@
+dn: uid=yanuar,ou=users,dc=example,dc=org
+objectClass: inetOrgPerson
+objectClass: organizationalPerson
+objectClass: person
+objectClass: top
+uid: yanuar
+cn: Yanuar Prayoga
+sn: Prayoga
+userPassword: admin
