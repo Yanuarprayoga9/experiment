@@ -28,3 +28,9 @@ type APIResponse struct {
 	Pagination *PaginationInfo `json:"pagination,omitempty"`
 	Error      string      `json:"error,omitempty"`
 }
+type DB struct {
+	*sql.DB
+}
+
+
+

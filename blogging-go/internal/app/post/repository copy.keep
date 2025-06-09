@@ -1,0 +1,237 @@
+package post
+
+// TODO
+// 1. GetAllPosts (include filter)
+// 2. GetPostBySlug
+// 3. GetPostById
+// 4. CreatePost
+// 5. UpdatePost
+// 6. DeletePost
+// 7. CreatePostLike
+// 8. DeletePostLike
+// package postpackage post
+
+
+import (
+	"fmt"
+	"strings"
+
+	user "myblog/internal/app/user"
+	"myblog/internal/services"
+
+	"github.com/jmoiron/sqlx"
+)
+
+const (
+	basePostQuery = `
+	WITH PostStats AS (
+		SELECT 
+			pb.Id,
+			COALESCE(lc.JumlahLike, 0) AS JumlahLike,
+			COALESCE(cc.JumlahKomentar, 0) AS JumlahKomentar,
+			(COALESCE(lc.JumlahLike, 0) + COALESCE(cc.JumlahKomentar, 0)) AS TotalInteraksi
+		FROM PostinganBlog pb
+		LEFT JOIN (
+			SELECT PostinganId, COUNT(*) AS JumlahLike
+			FROM PostinganLike
+			GROUP BY PostinganId
+		) lc ON pb.Id = lc.PostinganId
+		LEFT JOIN (
+			SELECT PostinganId, COUNT(*) AS JumlahKomentar
+			FROM KomentarBlog
+			WHERE DeletedAt IS NULL
+			GROUP BY PostinganId
+		) cc ON pb.Id = cc.PostinganId
+		WHERE pb.DeletedAt IS NULL
+	),
+	PostTags AS (
+		SELECT 
+			pt.PostinganId,
+			STRING_AGG(t.NamaTag, ',') AS Tags
+		FROM PostinganTag pt
+		INNER JOIN Tag t ON pt.TagId = t.Id
+		GROUP BY pt.PostinganId
+	)
+	SELECT
+		pb.Id, pb.Judul, pb.Slug, pb.Isi, pb.StatusReview, pb.Visibilitas,
+		pb.JumlahTayang, pb.UrlThumbnail, pb.CreatedAt, pb.UpdatedAt, pb.DeletedAt,
+		p.Id AS penulis_id, p.Nip AS penulis_nip, p.Nama AS penulis_nama,
+		p.Email AS penulis_email, p.Peran AS penulis_peran, p.Jabatan AS penulis_jabatan,
+		p.UnitKerja AS penulis_unit_kerja,
+		ps.JumlahLike, ps.JumlahKomentar, ps.TotalInteraksi,
+		COALESCE(ptags.Tags, '') AS Tags
+	FROM PostinganBlog pb
+	INNER JOIN Pengguna p ON pb.PenulisId = p.Id AND p.DihapusPada IS NULL
+	INNER JOIN PostStats ps ON pb.Id = ps.Id
+	LEFT JOIN PostTags ptags ON pb.Id = ptags.PostinganId
+	WHERE pb.DeletedAt IS NULL`
+
+	baseCountQuery = `
+	SELECT COUNT(*)
+	FROM PostinganBlog pb
+	INNER JOIN Pengguna p ON pb.PenulisId = p.Id AND p.DihapusPada IS NULL
+	WHERE pb.DeletedAt IS NULL`
+
+	defaultSort = "ps.TotalInteraksi DESC, pb.CreatedAt DESC"
+)
+
+// GetAllPosts retrieves all posts with filtering, sorting, and pagination
+func GetAllPosts(db *sqlx.DB, filters map[string]string) ([]PostinganBlogListResponse, *PaginationInfo, error) {
+	// Build QueryBuilder with filters
+	qb := services.NewQueryBuilder("", "").
+		AllowSort("created_at", "updated_at", "judul", "jumlah_tayang", "total_interaksi").
+		SetSearch(filters["search"], "pb.Judul", "pb.Isi").
+		ApplyFromQuery(filters)
+
+	if status := filters["status"]; status != "" {
+		qb.AddFilter("pb.StatusReview", status)
+	}
+	if visibilitas := filters["visibilitas"]; visibilitas != "" {
+		qb.AddFilter("pb.Visibilitas", visibilitas)
+	}
+	if penulisId := filters["penulis_id"]; penulisId != "" {
+		qb.AddFilter("pb.PenulisId", penulisId)
+	}
+
+	// Build WHERE conditions
+	var whereConditions []string
+	var args []interface{}
+	argIndex := 1
+
+	// Add filters from QueryBuilder
+	for field, value := range qb.Filters {
+		whereConditions = append(whereConditions, fmt.Sprintf("%s = $%d", field, argIndex))
+		args = append(args, value)
+		argIndex++
+	}
+		fmt.Println(whereConditions)
+
+
+
+	// Add search conditions
+	if qb.Search != "" && len(qb.SearchFields) > 0 {
+		var searchConditions []string
+		searchTerm := "%" + qb.Search + "%"
+		for _, field := range qb.SearchFields {
+			searchConditions = append(searchConditions, fmt.Sprintf("%s ILIKE $%d", field, argIndex))
+			args = append(args, searchTerm)
+			argIndex++
+		}
+		if len(searchConditions) > 0 {
+			whereConditions = append(whereConditions, "("+strings.Join(searchConditions, " OR ")+")")
+		}
+	}
+		fmt.Println(qb.Search)
+
+
+	// Build final query with additional WHERE conditions
+	query := basePostQuery
+	if len(whereConditions) > 0 {
+		query += " AND " + strings.Join(whereConditions, " AND ")
+	}
+
+	// Apply sorting
+	sortBy := defaultSort
+	if qb.Sort != "" && isAllowedSort(qb.Sort, qb.AllowedSorts) {
+		switch qb.Sort {
+		case "created_at":
+			sortBy = fmt.Sprintf("pb.CreatedAt %s", qb.Order)
+		case "updated_at":
+			sortBy = fmt.Sprintf("pb.UpdatedAt %s", qb.Order)
+		case "judul":
+			sortBy = fmt.Sprintf("pb.Judul %s", qb.Order)
+		case "jumlah_tayang":
+			sortBy = fmt.Sprintf("pb.JumlahTayang %s", qb.Order)
+		case "total_interaksi":
+			sortBy = fmt.Sprintf("ps.TotalInteraksi %s", qb.Order)
+		}
+	}
+		fmt.Println(sortBy)
+
+	query += " ORDER BY " + sortBy
+
+	// Apply pagination
+	offset := (qb.Page - 1) * qb.Limit
+
+	fmt.Println(offset)
+	query += fmt.Sprintf(" OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", offset, qb.Limit)
+
+
+	fmt.Println(query)
+	// Execute main query
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to execute posts query: %w", err)
+	}
+	defer rows.Close()
+
+	var posts []PostinganBlogListResponse
+	for rows.Next() {
+		var post PostinganBlogListResponse
+		var penulis user.Pengguna
+		var totalInteraksi int
+		var tagsString string
+
+		err := rows.Scan(
+			&post.ID, &post.Judul, &post.Slug, &post.Isi,
+			&post.StatusReview, &post.Visibilitas, &post.JumlahTayang,
+			&post.URLThumbnail, &post.CreatedAt, &post.UpdatedAt, &post.DeletedAt,
+			&penulis.ID, &penulis.Nip, &penulis.Nama, &penulis.Email,
+			&penulis.Peran, &penulis.Jabatan, &penulis.UnitKerja,
+			&post.JumlahLike, &post.JumlahKomentar, &totalInteraksi,
+			&tagsString,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to scan post row: %w", err)
+		}
+
+		post.Penulis = &penulis
+		
+		// Parse tags
+		if tagsString != "" {
+			post.Tags = strings.Split(tagsString, ",")
+			for i := range post.Tags {
+				post.Tags[i] = strings.TrimSpace(post.Tags[i])
+			}
+		} else {
+			post.Tags = []string{}
+		}
+
+		posts = append(posts, post)
+	}
+
+	// Get total count for pagination
+	countQuery := baseCountQuery
+
+	// Apply same WHERE conditions for count
+	if len(whereConditions) > 0 {
+		countQuery += " AND " + strings.Join(whereConditions, " AND ")
+	}
+
+	var totalCount int
+	err = db.QueryRow(countQuery, args...).Scan(&totalCount)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get total count: %w", err)
+	}
+
+	// Calculate pagination
+	totalPages := (totalCount + qb.Limit - 1) / qb.Limit
+	pagination := &PaginationInfo{
+		CurrentPage: qb.Page,
+		PageSize:    qb.Limit,
+		TotalItems:  totalCount,
+		TotalPages:  totalPages,
+	}
+
+	return posts, pagination, nil
+}
+
+// isAllowedSort checks if the sort field is allowed
+func isAllowedSort(field string, allowedSorts []string) bool {
+	for _, allowed := range allowedSorts {
+		if strings.EqualFold(allowed, field) {
+			return true
+		}
+	}
+	return false
+}
